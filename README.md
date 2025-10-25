@@ -1,35 +1,72 @@
-# Análise de Sentimentos em Tempo Real
+# Serviço de Análise de Sentimentos Facial
 
-Esta aplicação em Python abre a câmera do computador e utiliza um modelo pré-treinado de reconhecimento de emoções faciais para indicar, em tempo real, o sentimento predominante da pessoa enquadrada.
+Microserviço em Python que expõe uma API HTTP para detectar emoções faciais em imagens estáticas
+utilizando o modelo pré-treinado disponibilizado pela biblioteca [`fer`](https://github.com/justinshenk/fer).
 
-## Pré-requisitos
-- Python 3.9 ou superior
-- Webcam conectada ao computador
+## Funcionalidades
+- Endpoint `/predict` recebe uma imagem (multipart/form-data) e retorna a emoção predominante para cada rosto encontrado.
+- Endpoint `/health` permite monitorar o estado do serviço.
+- Pronto para execução em GPU por meio de container baseado em CUDA.
 
-## Instalação
-1. Crie e ative um ambiente virtual (opcional, mas recomendado).
-2. Instale as dependências:
+## Requisitos locais
+- Python 3.10+
+- Pip 21+
+
+## Instalação local
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate  # Windows PowerShell
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+## Execução local
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+### Exemplo de requisição
+```bash
+curl -X POST \
+  -F "file=@/caminho/para/imagem.jpg" \
+  http://localhost:8000/predict
+```
+
+Resposta esperada:
+```json
+{
+  "predictions": [
+    {
+      "label": "happy",
+      "confidence": 0.98,
+      "box": {"x": 123, "y": 45, "width": 88, "height": 88}
+    }
+  ]
+}
+```
+
+## Docker com GPU
+
+1. Compile a imagem (necessário [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)):
    ```bash
-   pip install -r requirements.txt
+   docker build -t analise-sentimentos-gpu .
    ```
-
-## Como executar
-1. Conecte a webcam ao computador.
-2. Execute o script principal:
+2. Execute liberando a GPU:
    ```bash
-   python app.py
+   docker run --rm -p 8000:8000 --gpus all analise-sentimentos-gpu
    ```
-3. Uma janela será aberta exibindo a imagem da câmera com a emoção predominante sobreposta ao rosto detectado.
-4. Pressione a tecla `q` para encerrar a aplicação.
 
 ## Estrutura do projeto
 ```
 .
-├── app.py            # Código principal da aplicação de reconhecimento de emoções
-├── README.md         # Este arquivo
-└── requirements.txt  # Dependências necessárias
+├── app.py           # Aplicação FastAPI
+├── Dockerfile       # Container CUDA com GPU
+├── README.md        # Este arquivo
+└── requirements.txt # Dependências Python
 ```
 
-## Observações
-- O modelo utilizado é fornecido pela biblioteca `fer`, que disponibiliza pesos treinados no dataset FER2013.
-- A aplicação é voltada para demonstrações educacionais. Para uso profissional, avalie as implicações éticas e de privacidade, e considere calibrações adicionais.
+## Considerações
+- O detector FER utiliza PyTorch/TensorFlow por baixo dos panos e faz uso automático de GPU quando disponível.
+- Imagens com múltiplos rostos retornam uma lista de previsões, uma por rosto detectado.
+- Verifique as implicações éticas e legais do reconhecimento de emoções antes de usar em produção.
