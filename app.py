@@ -1,17 +1,16 @@
-"""Aplicação de análise de sentimentos em tempo real usando webcam.
-
-O script utiliza a biblioteca `fer`, que disponibiliza um modelo pré-treinado
-no dataset FER2013, para estimar a emoção predominante no rosto detectado.
-"""
+"""Serviço FastAPI para análise de sentimentos facial."""
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, Tuple
 
 import cv2
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fer import FER
+from pydantic import BaseModel
 
 
 @dataclass
@@ -23,18 +22,37 @@ class EmotionPrediction:
     box: Tuple[int, int, int, int]
 
 
-def setup_camera(index: int = 0) -> cv2.VideoCapture:
-    """Inicializa a captura da webcam."""
-
-    capture = cv2.VideoCapture(index)
-    if not capture.isOpened():
-        raise RuntimeError(
-            "Não foi possível acessar a câmera. Verifique a conexão e as permissões."
-        )
-    return capture
+class HealthResponse(BaseModel):
+    status: str
 
 
-def predict_emotions(detector: FER, frame) -> list[EmotionPrediction]:
+class BoundingBox(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class PredictionItem(BaseModel):
+    label: str
+    confidence: float
+    box: BoundingBox
+
+
+class PredictionResponse(BaseModel):
+    predictions: list[PredictionItem]
+
+
+@lru_cache(maxsize=1)
+def get_detector() -> FER:
+    """Retorna uma instância compartilhada do detector de emoções."""
+
+    # O detector FER utiliza PyTorch/TensorFlow e fará uso de GPU quando disponível
+    # nas dependências instaladas. O parâmetro mtcnn melhora a detecção facial.
+    return FER(mtcnn=True)
+
+
+def predict_emotions(detector: FER, frame: np.ndarray) -> list[EmotionPrediction]:
     """Retorna as emoções predominantes para cada rosto no quadro fornecido."""
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -48,76 +66,86 @@ def predict_emotions(detector: FER, frame) -> list[EmotionPrediction]:
         predictions.append(
             EmotionPrediction(
                 label=label,
-                confidence=confidence,
-                box=(x, y, w, h),
+                confidence=float(confidence),
+                box=(int(x), int(y), int(w), int(h)),
             )
         )
     return predictions
 
 
-def draw_predictions(frame, predictions: list[EmotionPrediction]) -> None:
-    """Sobrepõe as informações de emoção no quadro de vídeo."""
+def load_image_from_bytes(data: bytes) -> np.ndarray:
+    """Decodifica bytes em um frame OpenCV."""
 
-    for prediction in predictions:
-        x, y, w, h = prediction.box
-        label = f"{prediction.label.capitalize()}: {prediction.confidence * 100:.1f}%"
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        text_y = y - 10 if y - 10 > 20 else y + h + 20
-        cv2.putText(
-            frame,
-            label,
-            (x, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+    image_array = np.frombuffer(data, dtype=np.uint8)
+    frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Os bytes fornecidos não representam uma imagem válida.")
+    return frame
 
 
-def main() -> None:
-    print("Inicializando detector de emoções...")
-    detector = FER()
+app = FastAPI(
+    title="Análise de Sentimentos Facial",
+    version="1.0.0",
+    description="API para detectar emoções em imagens faciais usando a biblioteca FER.",
+)
+
+
+@app.get("/", response_model=HealthResponse, tags=["status"])
+async def root() -> HealthResponse:
+    """Endpoint básico para verificar se a API está acessível."""
+
+    return HealthResponse(status="ok")
+
+
+@app.get("/health", response_model=HealthResponse, tags=["status"])
+async def healthcheck() -> HealthResponse:
+    """Retorna o status de saúde do serviço."""
+
+    return HealthResponse(status="healthy")
+
+
+@app.post("/predict", response_model=PredictionResponse, tags=["predictions"])
+async def predict(file: UploadFile = File(...)) -> PredictionResponse:
+    """Recebe uma imagem e retorna as emoções detectadas em cada rosto."""
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo de imagem válido.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="O arquivo enviado está vazio.")
 
     try:
-        capture = setup_camera()
-    except RuntimeError as exc:  # cobertura mínima de erro para feedback rápido
-        print(exc)
-        sys.exit(1)
+        frame = load_image_from_bytes(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    print("Pressione 'q' para encerrar a aplicação.")
+    detector = get_detector()
+    predictions = predict_emotions(detector, frame)
 
-    while True:
-        ret, frame = capture.read()
-        if not ret:
-            print("Não foi possível ler o quadro da câmera. Encerrando aplicação.")
-            break
-
-        predictions = predict_emotions(detector, frame)
-
-        display_frame = frame.copy()
-        if predictions:
-            draw_predictions(display_frame, predictions)
-        else:
-            cv2.putText(
-                display_frame,
-                "Nenhum rosto detectado",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
+    return PredictionResponse(
+        predictions=[
+            PredictionItem(
+                label=pred.label,
+                confidence=pred.confidence,
+                box=BoundingBox(
+                    x=pred.box[0],
+                    y=pred.box[1],
+                    width=pred.box[2],
+                    height=pred.box[3],
+                ),
             )
-
-        cv2.imshow("Análise de Sentimentos", display_frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    capture.release()
-    cv2.destroyAllWindows()
+            for pred in predictions
+        ]
+    )
 
 
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "app",
+    "EmotionPrediction",
+    "BoundingBox",
+    "PredictionItem",
+    "PredictionResponse",
+    "predict_emotions",
+    "load_image_from_bytes",
+]
